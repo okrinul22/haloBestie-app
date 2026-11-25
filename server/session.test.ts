@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from './store';
 import { createApp } from './app';
+import { SandboxPaymentAdapter } from './payments';
+import { DatabaseSync } from 'node:sqlite';
 
 function fixture() {
   let time=1000000;
@@ -88,7 +90,8 @@ test('listener disconnection refunds remaining time and cancels pending extensio
 test('paid cancellation refunds; unpaid cancellation does not; cancelled booking cannot reactivate',()=>{
   const f=fixture();try {
     const a=f.store.create('text',10);assert.equal(f.store.cancel(a.id).refund,0);
-    assert.throws(()=>f.store.pay(a.id,'success'));
+    assert.equal(f.store.pay(a.id,'success').status,'cancelled');
+    assert.equal(f.store.get(a.id).refund,15000);
     const b=f.store.create('text',30);f.store.pay(b.id,'success');
     assert.equal(f.store.cancel(b.id).refund,35000);
     assert.equal(f.store.pay(b.id,'success').status,'cancelled');
@@ -113,6 +116,10 @@ test('HTTP role checks, validation and full client-to-client flow',async()=>{
   try {
     assert.equal((await fetch(base+'/state')).status,401);
     assert.equal((await call('/availability','customer',{online:true})).status,403);
+    const quote=await(await call('/quote?service=voice&minutes=30','customer')).json();
+    assert.equal(quote.amount,65000);assert.equal(quote.currency,'IDR');
+    assert.equal((await call('/quote?service=text&minutes=1','customer')).status,400);
+    assert.equal((await call('/quote?service=text&minutes=10','bestie')).status,403);
     assert.equal((await call('/profile','bestie',{nickname:'Sunrise'})).status,403);
     assert.equal((await call('/profile','customer',{nickname:'email@example.com'})).status,400);
     assert.equal((await call('/profile','customer',{nickname:'Sunrise'})).status,200);
@@ -121,7 +128,12 @@ test('HTTP role checks, validation and full client-to-client flow',async()=>{
     const b=await (await call('/bookings','customer',{service:'text',minutes:10,price:1})).json();
     assert.equal(b.price,15000);
     assert.equal(b.nickname,'Sunrise');
-    await call(`/bookings/${b.id}/pay`,'customer',{outcome:'success'});
+    const failedEvent=randomUUID();
+    await call(`/bookings/${b.id}/pay`,'customer',{outcome:'failure',eventId:failedEvent});
+    assert.equal((await call(`/bookings/${b.id}/pay`,'customer',{outcome:'success',eventId:failedEvent})).status,409);
+    const successEvent=randomUUID();
+    const responses=await Promise.all(Array.from({length:5},()=>call(`/bookings/${b.id}/pay`,'customer',{outcome:'success',eventId:successEvent})));
+    assert(responses.every(r=>r.status===200));
     await call(`/bookings/${b.id}/accept`,'bestie',{});
     await call(`/bookings/${b.id}/ready`,'customer',{});await call(`/bookings/${b.id}/ready`,'bestie',{});
     assert.equal((await call(`/bookings/${b.id}/messages`,'customer',{id:randomUUID(),body:'Hi'})).status,201);
@@ -178,5 +190,127 @@ test('early ending applies role-specific refunds and freezes supported minutes',
     f.store.create('text',10);
     assert.equal(f.store.snapshot('customer',next.id).booking?.id,next.id);
     assert.equal(f.store.snapshot('customer').history.length,2);
+  } finally {f.close();}
+});
+test('booking creation and settlement are retry-safe and keep the selected method',()=>{
+  const f=fixture();try {
+    const requestId=randomUUID();
+    const b=f.store.create('text',10,'EWALLET',requestId);
+    assert.equal(f.store.create('text',10,'EWALLET',requestId).id,b.id);
+    assert.throws(()=>f.store.create('text',30,'EWALLET',requestId));
+    const failure=randomUUID();f.store.pay(b.id,'failure',failure);f.store.pay(b.id,'failure',failure);
+    assert.equal(f.store.snapshot('customer').payments[0].status,'failed');
+    const success=randomUUID();const paid=f.store.pay(b.id,'success',success);f.advance(1000);
+    assert.equal(f.store.pay(b.id,'success',success).deadline,paid.deadline);
+    assert.equal(f.store.pay(b.id,'failure').payment,'paid');
+    const receipt=f.store.snapshot('customer').payments;
+    assert.equal(receipt.length,1);assert.equal(receipt[0].method,'EWALLET');assert.equal(receipt[0].currency,'IDR');
+    assert.equal((f.store.db.prepare('SELECT COUNT(*) AS n FROM payment_events').get() as {n:number}).n,2);
+  } finally {f.close();}
+});
+test('matching reserves only an online listener and releases it after cancellation',()=>{
+  const f=fixture();try {
+    const b=f.store.create('voice',10);f.store.pay(b.id,'success');
+    assert.equal(f.store.snapshot('customer').reservedBookingId,null);
+    assert.throws(()=>f.store.accept(b.id));
+    f.store.availability(true);assert.equal(f.store.snapshot('customer').reservedBookingId,b.id);
+    f.store.accept(b.id);assert.equal(f.store.get(b.id).started,null);
+    f.advance(30000);f.store.sweep();
+    assert.equal(f.store.get(b.id).refund,25000);assert.equal(f.store.listener().reservedBookingId,null);
+    assert.equal(f.store.snapshot('customer').refunds.length,1);
+    assert.equal(f.store.snapshot('bestie').payments.length,0);
+    assert.equal(f.store.snapshot('bestie').refunds.length,0);
+  } finally {f.close();}
+});
+test('refunds use each purchased time block, including fully unused extensions',()=>{
+  const f=fixture();try {
+    f.store.availability(true);const b=f.store.create('text',30);f.store.pay(b.id,'success');
+    f.store.accept(b.id);f.store.ready(b.id,'customer');f.store.ready(b.id,'bestie');
+    const e=f.store.extend(b.id);f.store.payExtension(b.id,e.id,'success');
+    f.advance(20*60000);f.store.heartbeat();
+    assert.equal(f.store.finish(b.id,'bestie').refund,26667);
+    const refunds=f.store.snapshot('customer').refunds;
+    assert.deepEqual(refunds.map(r=>r.amount),[11667,15000]);
+    assert(refunds.every(r=>r.status==='completed'));
+    f.store.finish(b.id,'bestie');assert.equal(f.store.snapshot('customer').refunds.length,2);
+  } finally {f.close();}
+});
+test('a late sweep refunds from the disconnect deadline rather than the restart time',()=>{
+  const f=fixture();try {
+    const b=f.active();f.advance(15*60000);f.store.sweep();
+    assert.equal(f.store.get(b.id).closedAt,b.started!+60000);
+    assert.equal(f.store.get(b.id).refund,13500);
+    assert.equal(f.store.snapshot('customer').activity.minutes,1);
+  } finally {f.close();}
+});
+test('normal expiry closes access without a refund when Bestie stays connected',()=>{
+  const f=fixture();try {
+    const b=f.active();
+    for(let i=0;i<10;i++){f.advance(60000);f.store.heartbeat();f.store.sweep();}
+    assert.equal(f.store.get(b.id).status,'ended');assert.equal(f.store.get(b.id).closedAt,b.ends);
+    assert.equal(f.store.get(b.id).refund,0);assert.equal(f.store.snapshot('customer').refunds.length,0);
+    assert.throws(()=>f.store.send(b.id,'customer',randomUUID(),'Too late'));
+    assert.equal(f.store.snapshot('customer').booking?.ends,b.ends);
+  } finally {f.close();}
+});
+test('refund failures remain durable, retry with the same key, and stop after completion',()=>{
+  let time=1000000;let calls=0;const keys:string[]=[];
+  class RetryingAdapter extends SandboxPaymentAdapter {
+    refund(amount:number,key?:string) {
+      calls++;keys.push(key!);
+      if(calls===1) throw new Error('Temporary provider error');
+      return super.refund(amount);
+    }
+  }
+  const s=new Store(':memory:',()=>time,new RetryingAdapter());
+  try {
+    const b=s.create('text',10);s.pay(b.id,'success');time+=30000;s.sweep();
+    assert.equal(s.get(b.id).status,'cancelled');assert.equal(s.get(b.id).payment,'refund_pending');
+    assert.equal(s.snapshot('customer').refunds[0].status,'failed');
+    time+=5000;s.sweep();assert.equal(s.get(b.id).payment,'simulated_refunded');
+    assert.equal(s.snapshot('customer').refunds[0].status,'completed');assert.equal(calls,2);
+    assert.equal(keys[0],keys[1]);time+=5000;s.sweep();assert.equal(calls,2);
+  } finally {s.close();}
+});
+test('ledger receipts and refunds persist without inventing a refund on restart',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'halobestie-ledger-'));const path=join(dir,'test.sqlite');
+  let time=1000000;let s=new Store(path,()=>time);
+  try {
+    s.availability(true);const b=s.create('text',10,'VIRTUAL_ACCOUNT');s.pay(b.id,'success');s.accept(b.id);s.ready(b.id,'customer');s.ready(b.id,'bestie');
+    const e=s.extend(b.id);s.payExtension(b.id,e.id,'success');
+    time+=12*60000;s.heartbeat();s.finish(b.id,'bestie');
+    assert.equal(s.get(b.id).refund,12000);assert.equal(s.snapshot('customer').refunds.length,1);
+    s.close();s=new Store(path,()=>time);
+    const state=s.snapshot('customer');assert.equal(state.payments.length,2);
+    assert.equal(state.payments[0].method,'VIRTUAL_ACCOUNT');assert.equal(state.refunds.length,1);assert.equal(state.refunds[0].amount,12000);
+  } finally {s.close();rmSync(dir,{recursive:true,force:true});}
+});
+test('legacy databases migrate refund totals without replaying transfers',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'halobestie-legacy-'));const path=join(dir,'test.sqlite');
+  let time=1000000;let s=new Store(path,()=>time);
+  try {
+    s.availability(true);const b=s.create('text',10);s.pay(b.id,'success');s.accept(b.id);s.ready(b.id,'customer');s.ready(b.id,'bestie');
+    const e=s.extend(b.id);s.payExtension(b.id,e.id,'success');time+=60000;s.heartbeat();s.finish(b.id,'bestie');
+    const expected=s.get(b.id).refund;s.close();
+    const legacy=new DatabaseSync(path);
+    legacy.exec('DROP TABLE refunds; DROP TABLE payment_events; DROP TABLE payments; DROP TABLE booking_requests; DROP TABLE ledger_migrations;');legacy.close();
+    let calls=0;
+    class CountAdapter extends SandboxPaymentAdapter {refund(amount:number){calls++;return super.refund(amount);}}
+    s=new Store(path,()=>time,new CountAdapter());
+    const state=s.snapshot('customer');
+    assert.equal(state.refunds.reduce((sum,r)=>sum+r.amount,0),expected);
+    for(const refund of state.refunds) assert(refund.amount<=state.payments.find(p=>p.id===refund.paymentId)!.amount);
+    assert.equal(calls,0);
+  } finally {s.close();rmSync(dir,{recursive:true,force:true});}
+});
+test('extension settlement refunds instead of adding time when Bestie is unavailable',()=>{
+  const f=fixture();try {
+    const b=f.active();const e=f.store.extend(b.id);f.advance(16000);
+    assert.equal(f.store.get(b.id).status,'active');
+    assert.equal(f.store.payExtension(b.id,e.id,'success').status,'simulated_refunded');
+    assert.equal(f.store.get(b.id).ends,b.ends);
+    const receipt=f.store.snapshot('customer');
+    assert.equal(receipt.refunds[0].amount,15000);assert.equal(receipt.refunds[0].status,'completed');
+    f.store.payExtension(b.id,e.id,'success');assert.equal(f.store.snapshot('customer').refunds.length,1);
   } finally {f.close();}
 });

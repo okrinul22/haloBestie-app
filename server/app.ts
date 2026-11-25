@@ -3,6 +3,8 @@ import cors from 'cors';
 import { z } from 'zod';
 import { DomainError, Store } from './store';
 import type { Role } from '../shared/types';
+import { PRICES } from '../shared/types';
+import { PaymentEventConflict } from './ledger';
 
 export function createApp(store: Store) {
   const app=express();
@@ -21,7 +23,12 @@ export function createApp(store: Store) {
     next();
   };
   const id=(req: express.Request) => z.string().uuid().parse(req.params.id);
-  const outcome=z.object({outcome:z.enum(['success','failure'])});
+  const outcome=z.object({outcome:z.enum(['success','failure']),eventId:z.string().uuid().optional()});
+  app.get('/api/quote',only('customer'),(req,res) => {
+    const service=z.enum(['text','voice']).parse(req.query.service);
+    const minutes=z.enum(['10','30','60']).transform(v=>Number(v) as 10|30|60).parse(req.query.minutes);
+    res.json({service,minutes,amount:PRICES[service][minutes],currency:'IDR'});
+  });
   app.get('/api/state',(req,res) => res.json(store.snapshot(res.locals.role,req.query.bookingId===undefined ? undefined : z.string().uuid().parse(req.query.bookingId))));
   app.post('/api/profile',only('customer'),(req,res) => {
     const body=z.object({nickname:z.string().trim().min(2).max(24).regex(/^[\p{L}\p{N} _-]+$/u,'Use letters, numbers, spaces, underscores or hyphens')}).parse(req.body);
@@ -31,10 +38,12 @@ export function createApp(store: Store) {
     store.availability(z.object({online:z.boolean()}).parse(req.body).online); res.json({ok:true});
   });
   app.post('/api/bookings',only('customer'),(req,res) => {
-    const body=z.object({service:z.enum(['text','voice']),minutes:z.union([z.literal(10),z.literal(30),z.literal(60)])}).parse(req.body);
-    res.status(201).json(store.create(body.service,body.minutes));
+    const body=z.object({service:z.enum(['text','voice']),minutes:z.union([z.literal(10),z.literal(30),z.literal(60)]),method:z.enum(['QRIS','EWALLET','VIRTUAL_ACCOUNT']).default('QRIS'),requestId:z.string().uuid().optional()}).parse(req.body);
+    res.status(201).json(store.create(body.service,body.minutes,body.method,body.requestId));
   });
-  app.post('/api/bookings/:id/pay',only('customer'),(req,res) => res.json(store.pay(id(req),outcome.parse(req.body).outcome)));
+  app.post('/api/bookings/:id/pay',only('customer'),(req,res) => {
+    const body=outcome.parse(req.body);res.json(store.pay(id(req),body.outcome,body.eventId));
+  });
   app.post('/api/bookings/:id/cancel',only('customer'),(req,res) => res.json(store.cancel(id(req))));
   app.post('/api/bookings/:id/accept',only('bestie'),(req,res) => res.json(store.accept(id(req))));
   app.post('/api/bookings/:id/decline',only('bestie'),(req,res) => res.json(store.decline(id(req))));
@@ -50,11 +59,13 @@ export function createApp(store: Store) {
   });
   app.post('/api/bookings/:id/extensions',only('customer'),(req,res) => res.status(201).json(store.extend(id(req))));
   app.post('/api/bookings/:id/extensions/:extensionId/pay',only('customer'),(req,res) => {
-    res.json(store.payExtension(id(req),z.string().uuid().parse(req.params.extensionId),outcome.parse(req.body).outcome));
+    const body=outcome.parse(req.body);
+    res.json(store.payExtension(id(req),z.string().uuid().parse(req.params.extensionId),body.outcome,body.eventId));
   });
   app.use((error: unknown,_req:express.Request,res:express.Response,_next:express.NextFunction) => {
     if(error instanceof z.ZodError) return res.status(400).json({error:'Invalid request',details:error.issues.map(i => i.message)});
     if(error instanceof DomainError) return res.status(error.status).json({error:error.message});
+    if(error instanceof PaymentEventConflict) return res.status(409).json({error:error.message});
     if(error instanceof SyntaxError) return res.status(400).json({error:'Invalid JSON'});
     console.error(error); res.status(500).json({error:'Something went wrong. Please retry.'});
   });

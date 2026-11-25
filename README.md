@@ -14,8 +14,8 @@ npm start
 Open Customer at http://localhost:8081 and Bestie at http://localhost:8082. The API runs at http://localhost:3001.
 
 1. Bestie goes online.
-2. Customer chooses a nickname, text chat, and 10, 30, or 60 minutes.
-3. Customer confirms the sandbox payment. No money is charged.
+2. Customer chooses a nickname, text or voice booking, 10, 30, or 60 minutes, and a sandbox method: QRIS, e-wallet, or bank transfer. Voice bookings use text chat only.
+3. The backend returns an IDR quote. Customer can simulate payment success or failure; no money is charged. Failed payments stay unpaid and can be retried.
 4. Bestie accepts; both participants confirm they are ready.
 5. Exchange messages, add 10 minutes, or end the session.
 6. Customer leaves a rating and optional feedback. Both apps can open past sessions through Session history.
@@ -25,16 +25,35 @@ The Bestie workspace includes completed-session count, minutes supported, and av
 ## Sessions and refunds
 
 - One customer and one Bestie are preconfigured. Only one booking can be open at a time.
-- Payment and extension requests are idempotent. Failed payments can be retried.
+- Booking request IDs, payment event IDs, and extension records prevent duplicate bookings, settlements, and added time. Failed payments can be retried; later failure events cannot reverse a successful payment.
+- A paid booking reserves the online Bestie and waits for acceptance. If the listener comes online during the 30-second window, the server reserves them then. The paid timer starts only after both participants are ready.
+- Each payment has a persistent receipt with method, IDR amount, reference, and status. Refunds have separate pending, failed, and completed states. Failed or pending sandbox refunds retry every five seconds using the same refund reference. These records survive restarts.
+- A successful payment arriving after cancellation is fully refunded and never reopens the booking.
 - If no Bestie accepts within 30 seconds, the booking is cancelled and the sandbox payment is refunded.
 - Bestie can decline a waiting booking for a full sandbox refund.
 - Both participants must become ready within 30 seconds of acceptance or the booking is refunded.
 - Keep Bestie open for connection heartbeats. A disconnect of 60 seconds ends an active session and refunds unused time in the sandbox.
 - Customer disconnection does not pause the timer. Customer-initiated early ending does not refund unused time; Bestie-initiated early ending does.
-- Expired sessions reject new messages. Late extension payments are refunded in the sandbox.
+- Expired sessions reject new messages. The server stores the original end time; reopening either app cannot reset it.
+- An extension payment adds time once only while the session is active and the Bestie is available. Late payments and payments made while the Bestie is unavailable are refunded in the sandbox.
+- Unused-time refunds are calculated separately for the original purchase and each paid extension, respecting different prices. A delayed server restart uses the disconnect deadline rather than charging for the outage.
 - History includes the latest 30 closed sessions; messages and feedback persist across server restarts.
 
 SQLite data lives in `data/halobestie.sqlite`. Existing databases upgrade automatically. Stop the API before deleting `data/` if you want a fresh local setup.
+
+## Test the paid flow
+
+Open both apps. Keep Bestie online, select a service, duration, and sandbox method on Customer, then test failure followed by success. Bestie accepts and both click ready. Send messages, create an extension, and confirm its sandbox payment. Check the remaining time and receipt.
+
+For the no-listener case, keep Bestie offline and complete a sandbox payment. After 30 seconds, the booking is cancelled and the refund appears in the receipt. To test late extension settlement, create an extension, let Bestie end the session, then settle the extension from Customer: no time is added and that payment is refunded. Closing Bestie for 60 seconds during an active session tests disconnect recovery. Use automated tests for expiry without waiting ten minutes.
+
+## Production replacement (outside the simulated flow)
+
+Before enabling real payments, integrate approved Xendit methods using hosted checkout, authenticated provider verification, deduplicated durable webhooks, and payment reconciliation. Refund requests need an outbox and final provider confirmation; a request response alone must not be labeled completed. Check full and partial refund support for every enabled channel, including manual support for unsupported refunds. The current synchronous adapter is sandbox-only and is not a live-payment integration.
+
+Live voice needs a managed SDK with private session credentials, join verification before billing, provider-enforced expiry, and expiry updates for paid extensions. Voice remains a text-only booking preview here. Review Apple and Google payment eligibility, including transcript/replay behavior, before store submission.
+
+Provider references: [Xendit sessions](https://docs.xendit.co/apidocs/create-session), [Xendit refund lifecycle](https://docs.xendit.co/apidocs/create-a-refund), [Daily session time limits](https://www.daily.co/blog/video-call-api-tutorial-time-limits-for-rooms-and-meetings/), [Apple review guidelines](https://developer.apple.com/app-store/review/guidelines/), [Google payment policy](https://support.google.com/googleplay/android-developer/answer/10281818?hl=en-TJ).
 
 ## Android and iOS
 
