@@ -6,29 +6,20 @@ import { PRICES } from './shared/types';
 import VoiceSession from './components/VoiceSession';
 import SessionAlert, { type SessionNotice } from './components/SessionAlert';
 
-const role: Role = process.env.EXPO_PUBLIC_APP_ROLE === 'bestie' ? 'bestie' : 'customer';
-const API = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3001';
-const token = role === 'customer' ? process.env.EXPO_PUBLIC_CUSTOMER_TOKEN || 'local-customer' : process.env.EXPO_PUBLIC_BESTIE_TOKEN || 'local-bestie';
+import AuthGate from './components/AuthGate';
+import { API, role, request } from './client/api';
+
 const uuid=()=> 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.floor(Math.random()*16);return (c==='x'?r:(r&3|8)).toString(16);});
 const methodName=(method:PaymentMethod)=>({QRIS:'QRIS',EWALLET:'E-wallet',VIRTUAL_ACCOUNT:'Bank transfer'}[method]);
 const money = (n: number) => 'Rp' + n.toLocaleString('id-ID');
 const clock = (ms: number) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`; };
-async function request<T>(path: string, data?: unknown): Promise<T> {
-  const response = await fetch(API + '/api' + path, {
-    method: data === undefined ? 'GET' : 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type':'application/json' },
-    body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(8000)
-  });
-  const result = await response.json();
-  if(!response.ok) throw new Error(result.error || 'Request failed');
-  return result;
-}
 function Button({ title, onPress, secondary, disabled }: { title:string; onPress:()=>void; secondary?:boolean; disabled?:boolean }) {
   return <Pressable accessibilityRole="button" accessibilityState={{disabled:!!disabled}} disabled={disabled} onPress={onPress}
     style={({pressed}) => [styles.button, secondary && styles.secondary, (pressed || disabled) && {opacity:0.55}]}>
     <Text style={[styles.buttonText, secondary && {color:'#235953'}]}>{title}</Text>
   </Pressable>;
 }
-export default function App() {
+function App({onLogout}:{onLogout:()=>Promise<void>}) {
   const [state,setState]=useState<Snapshot | null>(null);
   const [service,setService]=useState<Service>('text');
   const [minutes,setMinutes]=useState<10|30|60>(10);
@@ -48,6 +39,10 @@ export default function App() {
   const [stars,setStars]=useState(5);
   const [comment,setComment]=useState('');
   const [confirmEnd,setConfirmEnd]=useState(false);
+  const [reportReason,setReportReason]=useState('');
+  const [reportOpen,setReportOpen]=useState(false);
+  const [blockConfirm,setBlockConfirm]=useState(false);
+  const [supportNotice,setSupportNotice]=useState('');
   const [notices,setNotices]=useState<SessionNotice[]>([]);
   const seenNotices=useRef(new Set<string>());
   const selectedId=useRef<string | null>(null);
@@ -105,7 +100,7 @@ export default function App() {
     finally { working.current=false; setBusy(false); }
   }
   const b=state?.booking;
-  useEffect(()=>{setConfirmEnd(false);setStars(5);setComment('');setBody('');pendingMessage.current=null;bookingRequest.current=null;paymentEvents.current={};},[b?.id]);
+  useEffect(()=>{setConfirmEnd(false);setReportOpen(false);setReportReason('');setBlockConfirm(false);setSupportNotice('');setStars(5);setComment('');setBody('');pendingMessage.current=null;bookingRequest.current=null;paymentEvents.current={};},[b?.id]);
   const closed=!!b && ['ended','cancelled'].includes(b.status);
   const endpoint='/bookings/'+b?.id;
   const ready=role === 'customer' ? b?.customerReady : b?.bestieReady;
@@ -137,7 +132,7 @@ export default function App() {
   }
   return <SafeAreaView style={styles.safe}><StatusBar style="dark"/><SessionAlert notice={notices[0]} onClose={()=>setNotices(items=>items.slice(1))}/><ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
     <View style={styles.header}><View><Text style={styles.logo}>halo<Text style={{color:'#2a8273'}}>bestie</Text><Text style={styles.logoDot}> ✳</Text></Text><Text style={styles.caption}>A little space to feel heard.</Text></View><View style={styles.role}><Text style={styles.roleText}>{role === 'customer' ? 'CUSTOMER' : 'BESTIE'}</Text></View></View>
-    <View style={styles.banner}><Text style={styles.bannerText}>Payment sandbox · Text chat & browser voice</Text></View>
+    <Button title="Sign out" secondary onPress={()=>void onLogout().catch(()=>setError('Unable to complete sign out.'))}/><View style={styles.banner}><Text style={styles.bannerText}>Payment sandbox · Text chat & browser voice</Text></View>
     {connection ? <Text accessibilityRole="alert" style={styles.error}>{connection} Check {API}.</Text> : null}
     {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
     {state && <View style={styles.row}><Button title="Your session" secondary={tab!=='session'} onPress={()=>{selectedId.current=null;setTab('session');void refresh().catch(()=>setError('Unable to load your session.'));}}/><Button title="Session history" secondary={tab!=='history'} onPress={()=>setTab('history')}/></View>}
@@ -175,6 +170,7 @@ export default function App() {
         {b.status==='active'&&<View style={styles.extension}>{confirmEnd?<><Text style={styles.note}>{role==='customer'?'End this session now? Unused time is not refunded when you choose to leave.':'End this session now? The customer will receive a sandbox refund for unused time.'}</Text><Button title="Confirm end session" disabled={busy} onPress={()=>void act(()=>request(endpoint+'/end',{}))}/><Button title="Keep talking" secondary onPress={()=>setConfirmEnd(false)}/></>:<Button title="End session" secondary onPress={()=>setConfirmEnd(true)}/>}</View>}
         {b.status==='ended'&&role==='customer'&&<View style={styles.extension}><Text style={styles.cardTitle}>{state.rating?'Thank you for your feedback':'How was your session?'}</Text>{state.rating?<><Text style={styles.note}>{'★'.repeat(state.rating.stars)} · {state.rating.stars}/5</Text>{!!state.rating.comment&&<Text style={styles.note}>{state.rating.comment}</Text>}</>:<><View style={styles.row}>{[1,2,3,4,5].map(n=><Pressable key={n} accessibilityRole="button" accessibilityLabel={n+' stars'} onPress={()=>setStars(n)}><Text style={[styles.star,{color:n<=stars?'#b87b26':'#c4d2ca'}]}>★</Text></Pressable>)}</View><TextInput accessibilityLabel="Session feedback" placeholder="Share a little feedback (optional)" value={comment} onChangeText={setComment} maxLength={300} style={styles.input} multiline/><Button title="Submit feedback" disabled={busy} onPress={()=>void act(()=>request(endpoint+'/rating',{stars,comment}))}/></>}</View>}
         {closed&&<><Text style={styles.note}>{b.reason?.replace(/\(demo\)/g,'(sandbox)')||'Your time together has ended. Thank you for showing up.'}</Text>{b.refund>0&&<Text style={styles.refund}>Refund requested · {money(b.refund)}{b.payment==='paid'?' (unused session time)':''}</Text>}</>}
+        {['connecting','active','ended'].includes(b.status)&&<View style={styles.extension}><Button title="Report a concern" secondary onPress={()=>setReportOpen(!reportOpen)}/>{reportOpen&&<><TextInput accessibilityLabel="Report details" placeholder="Tell our support team what happened" value={reportReason} onChangeText={setReportReason} maxLength={1000} multiline style={styles.input}/><Button title="Send report" disabled={busy||reportReason.trim().length<5} onPress={()=>void act(async()=>{await request(endpoint+'/report',{reason:reportReason});setReportOpen(false);setSupportNotice('Your report was sent to support.');})}/></>}<Button title={blockConfirm?'Confirm block for future matching':'Block future matching'} secondary disabled={busy} onPress={()=>{if(!blockConfirm){setBlockConfirm(true);return;}void act(async()=>{await request(endpoint+'/block',{});setBlockConfirm(false);setSupportNotice('You will not be matched with this participant again. Your current session is unchanged.');});}}/>{!!supportNotice&&<Text style={styles.note}>{supportNotice}</Text>}</View>}
         {role==='customer'&&state.payments.length>0&&<View style={styles.extension}><Text style={styles.cardTitle}>Payment receipt</Text>{state.payments.map(payment=><View key={payment.id} style={styles.receiptRow}><Text style={styles.label}>{payment.kind==='booking'?'Session':'10-minute extension'} · {money(payment.amount)}</Text><Text style={styles.muted}>{methodName(payment.method)} · {payment.currency} · {payment.status==='paid'?'Paid (sandbox)':payment.status==='failed'?'Payment failed':'Awaiting payment'}</Text><Text style={styles.footnote}>Reference: {payment.targetId.slice(0,8)}</Text></View>)}{state.refunds.map(refund=><View key={refund.id} style={styles.receiptRow}><Text style={styles.label}>{money(refund.amount)} · {refund.status==='completed'?'Sandbox refund completed':refund.status==='pending'?'Refund pending':'Refund failed · retry scheduled'}</Text><Text style={styles.muted}>{refund.reason}</Text>{refund.status!=='completed'&&<Text style={styles.footnote}>We keep this request until completion. You can safely reopen the app.</Text>}</View>)}</View>}
       </View>}
       {role==='bestie'&&(!b||closed)&&<View style={styles.card}><Text style={styles.cardTitle}>Ready when they are</Text><Text style={styles.description}>Waiting bookings appear here automatically. Open the Customer app to try the complete flow.</Text></View>}
@@ -195,3 +191,5 @@ const styles=StyleSheet.create({
   historyItem:{paddingVertical:14,borderBottomWidth:1,borderBottomColor:'#e5ece7',gap:6},stat:{fontSize:27,fontWeight:'700',color:'#225f51'},star:{fontSize:34},
   messages:{height:280,backgroundColor:'#f5f8f6',borderRadius:16},bubble:{maxWidth:'85%',padding:13,borderRadius:14,gap:5},ownBubble:{alignSelf:'flex-end',backgroundColor:'#dbeee3'},otherBubble:{alignSelf:'flex-start',backgroundColor:'#e8ecea'},sender:{fontSize:11,fontWeight:'700',color:'#416957'},messageText:{fontSize:15,lineHeight:22,color:'#24483e'},empty:{textAlign:'center',fontSize:14,lineHeight:22,color:'#7b8d81',paddingVertical:32},composer:{gap:10},input:{borderWidth:1,borderColor:'#d8e3da',borderRadius:13,padding:14,minHeight:52,fontSize:15,color:'#24483e',maxHeight:130},extension:{borderTopWidth:1,borderTopColor:'#e5ece7',paddingTop:16,gap:12},refund:{color:'#276e5e',fontSize:15,fontWeight:'700'},footer:{fontSize:12,lineHeight:20,color:'#7a8b81',textAlign:'center'}
 });
+
+export default function Root(){return <AuthGate>{(user,logout)=><App key={user.id} onLogout={logout}/>}</AuthGate>;}

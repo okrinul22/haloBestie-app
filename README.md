@@ -1,77 +1,106 @@
 # HaloBestie
 
-A simple local emotional-support app with separate Customer and Bestie targets. Built with TypeScript, React Native / Expo, Express, and SQLite.
+A local emotional-support app with separate Customer and Bestie targets. TypeScript, React Native / Expo, Express, and SQLite. Payments remain sandbox-only, as requested.
 
-## Run locally
+## Start
 
 Requires Node.js 24 and npm.
 
 ```sh
 npm install
+cp .env.example .env
 npm start
 ```
 
-Open Customer at http://localhost:8081 and Bestie at http://localhost:8082. The API runs at http://localhost:3001.
+Open Customer at http://localhost:8081 and Bestie at http://localhost:8082. The API runs at http://localhost:3001; its health check is `/health` and database readiness check is `/ready`.
 
-1. Bestie goes online.
-2. Customer chooses a nickname, text chat or browser voice, 10, 30, or 60 minutes, and a sandbox method: QRIS, e-wallet, or bank transfer.
-3. The backend returns an IDR quote. Customer can simulate payment success or failure; no money is charged. Failed payments stay unpaid and can be retried.
-4. Bestie accepts. For text, both participants confirm readiness. For voice, both click Connect microphone and allow permission; the timer starts when both audio connections are ready.
-5. Exchange messages in text sessions or speak through the microphone in voice sessions. Either session can be extended or ended.
-6. Customer leaves a rating and optional feedback. Both apps can open past sessions through Session history.
+1. Create a customer account in Customer. Choose a private nickname and a password with at least 12 characters, then sign in.
+2. Create a listener account in Bestie. Approve it from the server terminal:
 
-The Bestie workspace includes completed-session count, minutes supported, and average rating. Only nicknames are shared; no email or phone number is stored.
+   ```sh
+   npm run approve-bestie -- listener@example.com
+   ```
 
-## Sessions and refunds
+3. Sign in to Bestie and go online.
+4. Customer chooses text or browser voice, a duration, and a sandbox method. Confirm the simulated payment.
+5. The assigned Bestie accepts. For text, both click ready. For voice, both connect their microphones.
+6. Talk, extend, or end the session. Customer can leave feedback. Both roles can report a concern or block future matching.
 
-- One customer and one Bestie are preconfigured. Only one booking can be open at a time.
-- Booking request IDs, payment event IDs, and extension records prevent duplicate bookings, settlements, and added time. Failed payments can be retried; later failure events cannot reverse a successful payment.
-- A paid booking reserves the online Bestie and waits for acceptance. If the listener comes online during the 30-second window, the server reserves them then. The paid timer starts only after both participants are ready. Session APIs also verify a matching paid ledger receipt: correct amount, IDR currency, settlement timestamp, and no full refund. A client booking status alone cannot unlock the session.
-- Each payment has a persistent receipt with method, IDR amount, reference, and status. Refunds have separate pending, failed, and completed states. Failed or pending sandbox refunds retry every five seconds using the same refund reference. These records survive restarts.
-- A successful payment arriving after cancellation is fully refunded and never reopens the booking.
-- If no Bestie accepts within 30 seconds, the booking is cancelled and the sandbox payment is refunded.
-- Bestie can decline a waiting booking for a full sandbox refund.
-- Both participants must become ready within 30 seconds of acceptance for text, or 60 seconds for microphone setup in voice, or the booking is refunded.
-- Keep Bestie open for connection heartbeats. A disconnect of 60 seconds ends an active session and refunds unused time in the sandbox.
-- Customer disconnection does not pause the timer. Customer-initiated early ending does not refund unused time; Bestie-initiated early ending does.
-- Expired sessions reject new messages. The server stores the original end time; reopening either app cannot reset it.
-- An extension payment adds time once only while the session is active and the Bestie is available. Late payments and payments made while the Bestie is unavailable are refunded in the sandbox.
-- Unused-time refunds are calculated separately for the original purchase and each paid extension, respecting different prices. A delayed server restart uses the disconnect deadline rather than charging for the outage.
-- History includes the latest 30 closed sessions; messages and feedback persist across server restarts.
+There are no public passwords, preconfigured login tokens, or automatic Bestie approvals. Old anonymous records stay in the database under a legacy owner; registering a new account does not claim somebody else's old history. Do not delete the database when upgrading.
 
-SQLite data lives in `data/halobestie.sqlite`. Existing databases upgrade automatically. Stop the API before deleting `data/` if you want a fresh local setup.
+## Accounts and privacy
 
-## Payment proof and alerts
+Passwords are hashed with individually salted scrypt (N=131072, r=8, p=1). Session tokens are random, stored as SHA-256 hashes in SQLite, expire after seven days, and are revoked on sign-out. Browser sessions use separate HttpOnly, SameSite=Strict Customer and Bestie cookies, so both apps work in one browser. Tokens are not kept in browser localStorage. Native bearer tokens stay in memory; native users sign in again after an app restart.
 
-The verified sandbox receipt is visible to Customer and Bestie before session entry. It includes the booking reference, amount, currency, and settlement time. Fetch it from `GET /api/bookings/:id/payment-proof` using the same local identity header as other API requests. This proves a simulated payment was recorded; it is not evidence of a real bank transfer. Screenshots and client-supplied paid status never authorize session access.
+Every booking, message, receipt, rating, refund, report, and voice-signaling endpoint checks the signed-in participant. Customer and Bestie histories and statistics are account-scoped. Listeners see customer nicknames; private customer account IDs and emails are excluded from listener session responses. Login/registration have per-IP limits. API responses are not cacheable.
 
-Both apps show alerts for payment failure/verification, session start, one minute remaining, cancellation, and session end. At exactly the server end time, the text composer disappears and microphone tracks are stopped. End-of-session alerts take priority over earlier warnings. History remains readable, but the backend rejects new messages, voice signaling, and reconnection after expiry. Ten-minute boundary tests use a controlled server clock; browser microphone cleanup is checked separately with a shortened isolated QA session.
+Set `COOKIE_SECURE=true` when serving over HTTPS. Browser origins are restricted by `ALLOWED_ORIGINS`; include your actual app origins when using LAN addresses or reverse proxies. Local HTTP is for development. Email verification, password recovery, and administrator MFA are still needed before public release.
 
-## Browser voice calls
+## Matching and paid sessions
 
-Voice now uses WebRTC microphone audio rather than text. Open Customer and Bestie in separate browser tabs or devices, complete sandbox payment, accept, then connect both microphones. Mute/unmute and reconnect controls are available. Use headphones to avoid feedback when both tabs share the same computer.
+Multiple customers can book concurrently. Each customer can have one open booking, and each listener can hold one reservation/session. Transactions and unique indexes prevent double assignment. Matching chooses an available approved Bestie, prefers listeners least recently matched, and excludes blocked pairs. If nobody accepts within 30 seconds, the sandbox payment is refunded.
 
-This is a local peer-to-peer implementation with no external STUN/TURN relay. It is verified on localhost; different networks may require a configured TURN service or a managed voice provider. Microphone access requires localhost or HTTPS. If connection recovery fails, click Reconnect voice on both apps within the 60-second recovery window. Voice health is based on media-connection heartbeats, not just an open Bestie tab.
+The backend returns the IDR quote. Sandbox choices are QRIS, e-wallet, and bank transfer; none creates a real charge. Failed payments stay unpaid. Booking request IDs and payment event IDs make retries safe. A successful payment arriving after cancellation is refunded without reopening the booking.
 
-Native Expo microphone calling is not implemented in this build. Native voice selection is disabled and existing voice bookings show a browser requirement instead of silently switching to text. A native WebRTC development build or managed voice SDK is required before offering native voice.
+Saved payment proof must match the booking amount, currency, settled status, and settlement timestamp before session access. Customer and Bestie see the verified sandbox receipt before entering. `GET /api/bookings/:id/payment-proof` returns it for an authenticated participant. It confirms a recorded simulated payment, not a real bank transfer.
 
-## Test the paid flow
+Text participants have 30 seconds after acceptance to become ready; browser voice has 60 seconds for microphone setup. Time starts only when both are ready. The server saves the end time, so reopening the app cannot reset it. At expiry, new messages and signaling are rejected, the composer closes, and browser microphones stop. Alerts cover payment failure/verification, start, one minute remaining, cancellation, and end.
 
-Open both apps. Keep Bestie online, select a service, duration, and sandbox method on Customer, then test failure followed by success. Bestie accepts and both click ready. Send messages, create an extension, and confirm its sandbox payment. Check the remaining time and receipt.
+Paid extensions add ten minutes exactly once while the session and listener remain available. Late payments are refunded. Unused-time refunds are calculated separately for each purchased time block. Customer-initiated early ending does not refund unused time; Bestie-initiated ending does. A listener disconnect of 60 seconds ends the session and refunds unused time. Customer disconnects do not pause the timer.
 
-For the no-listener case, keep Bestie offline and complete a sandbox payment. After 30 seconds, the booking is cancelled and the refund appears in the receipt. To test late extension settlement, create an extension, let Bestie end the session, then settle the extension from Customer: no time is added and that payment is refunded. Closing Bestie for 60 seconds during an active session tests disconnect recovery. Use automated tests for expiry without waiting ten minutes.
+Receipts and refund records persist. Refunds have pending, failed, and completed states; pending/failed sandbox refunds retry every five seconds with the same reference. Server restarts reconcile session deadlines. Each account can open its last 30 closed sessions.
 
-## Production replacement (outside the simulated flow)
+## Browser voice and optional TURN
 
-Before enabling real payments, integrate approved Xendit methods using hosted checkout, authenticated provider verification, deduplicated durable webhooks, and payment reconciliation. Refund requests need an outbox and final provider confirmation; a request response alone must not be labeled completed. Check full and partial refund support for every enabled channel, including manual support for unsupported refunds. The current synchronous adapter is sandbox-only and is not a live-payment integration.
+Browser voice exchanges microphone audio through WebRTC, with mute and reconnect controls. Use headphones when testing both apps on one computer. Microphones require localhost or HTTPS. If recovery fails, reconnect on both apps within 60 seconds. Media health is tracked separately from an open Bestie tab.
 
-Live voice needs a managed SDK with private session credentials, join verification before billing, provider-enforced expiry, and expiry updates for paid extensions. The local browser call is peer-to-peer; production and native voice still require that managed media integration. Review Apple and Google payment eligibility, including transcript/replay behavior, before store submission.
+Local defaults use direct peer connections. For different networks, configure a coturn-compatible relay on the server:
 
-Provider references: [Xendit sessions](https://docs.xendit.co/apidocs/create-session), [Xendit refund lifecycle](https://docs.xendit.co/apidocs/create-a-refund), [Daily session time limits](https://www.daily.co/blog/video-call-api-tutorial-time-limits-for-rooms-and-meetings/), [Apple review guidelines](https://developer.apple.com/app-store/review/guidelines/), [Google payment policy](https://support.google.com/googleplay/android-developer/answer/10281818?hl=en-TJ).
+```dotenv
+TURN_URLS=turn:relay.example:3478?transport=udp,turns:relay.example:5349?transport=tcp
+TURN_SECRET=your-server-side-shared-secret
+VOICE_FORCE_RELAY=false
+```
 
-## Android and iOS
+Keep real values in the ignored `.env` file, never in `EXPO_PUBLIC_*`. The authenticated `/api/bookings/:id/voice/config` endpoint issues two-hour credentials only to paid, assigned voice participants. It does not expose the shared secret or private user ID. Set `VOICE_FORCE_RELAY=true` to require the configured relay during relay testing. No relay account is configured or contacted by default, and external relay connectivity has not been verified without that service.
 
-Copy `.env.example` to `.env`, then set `EXPO_PUBLIC_API_URL` to your computer's LAN IP, for example `http://192.168.1.20:3001`. Use the same Wi-Fi network on phones and computer. Start each process in a separate terminal:
+Native voice selection remains disabled; native WebRTC development builds or a managed mobile SDK are still required. Native voice bookings never silently turn into text chat.
+
+## Reporting and support operations
+
+Reports are visible only through administrator endpoints. Blocking prevents future matching with that participant and leaves the current session unchanged; either participant can still explicitly end the current session.
+
+Create a separate support account, then promote it from the server terminal:
+
+```sh
+npm run make-admin -- support@example.com
+```
+
+Promotion revokes its existing sessions. Sign in through `POST /auth/login` with `role: "admin"` to obtain a support bearer token. There is no public administrator registration or default administrator password. Use this token only in authorized support tooling, not in the customer/listener apps.
+
+Administrator endpoints:
+
+- `GET /api/admin/reports` — open reports.
+- `POST /api/admin/reports/:reportId/resolve` — resolve a report and record an audit entry.
+- `GET /api/admin/refunds` — refunds needing follow-up.
+- `POST /api/admin/refunds/:refundId/retry` — retry an existing refund with its stable reference and record an audit entry.
+- `GET /api/admin/health` — database status, session/refund counts, reports, and reconciliation-worker status.
+
+Enable `LOG_REQUESTS=true` for JSON request logs with correlation IDs, status, path, and duration. Passwords, request bodies, and session tokens are not logged. Liveness and readiness checks are public; operational details require an administrator session.
+
+## Backups
+
+```sh
+npm run backup
+```
+
+This creates a consistent SQLite snapshot in ignored `backups/`, with owner-only file permissions. It can run while the API is active. Keep backups private and copy them off the server using your own retention/storage policy. Verify restoration into a separate database path before replacing a live database; leave the original untouched until validation passes.
+
+The database defaults to `data/halobestie.sqlite`. `DATABASE_PATH` selects another path. Backend and management scripts load an optional `.env` file. Tests use isolated databases.
+
+## Android/iOS text testing
+
+Set `EXPO_PUBLIC_API_URL` to your computer's LAN address, add the browser origins to `ALLOWED_ORIGINS` if testing web clients over LAN, and use the same Wi-Fi network. Start the three processes separately and scan Expo QR codes on separate devices:
 
 ```sh
 npm run api
@@ -79,9 +108,9 @@ npm run customer
 npm run bestie
 ```
 
-Scan the Expo QR codes with Expo Go on separate devices. The targets have separate Android package and iOS bundle identifiers. Native device and simulator execution is not verified in this Linux environment; browser previews and web exports are checked.
+Native devices and simulators are not verified in this Linux workspace. Browser builds, account flows, matching, and messaging are checked.
 
-## Checks
+## Verification
 
 ```sh
 npm run typecheck
@@ -90,8 +119,12 @@ npm run build:customer
 npm run build:bestie
 ```
 
-## Current limits
+Tests include authentication, cookie isolation, session expiry/revocation, cross-account access denial, concurrent matching, moderation, TURN credential generation, live backup integrity, payment retries/refunds, and exact ten-minute text/voice expiry. Browser voice was checked using microphone test devices and two-way RTP statistics; expiry closes peers and microphone tracks.
 
-Text messaging, matching, timers, history, nicknames, ratings, and activity statistics run locally with persistent storage. Payments and refunds use a **sandbox adapter** and never move real money. Browser voice uses WebRTC on localhost; native voice and internet-wide relay infrastructure are not connected.
+## Remaining external integrations
 
-The two local identity tokens are public development identifiers, not secure authentication. There is no account registration, multi-user isolation, live payment gateway, production TLS, or store release. Use this app locally. Real checkout, verified provider webhooks, secure accounts, native voice support, and a managed media/relay service are the next steps before a public launch.
+Real checkout and real refunds remain disabled because merchant access is not yet available. Before enabling them, add approved Xendit channels, verified/deduplicated webhooks, reconciliation, and a durable refund outbox with final provider confirmation. The synchronous sandbox adapter must not be used for real money.
+
+Internet-wide relay hosting, native calling, production HTTPS, recovery email, and administrator MFA require further configuration/integration. No site or app-store release is performed by `npm start`.
+
+References: [OWASP password storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html), [coturn credentials](https://github.com/coturn/coturn/blob/master/man/man1/turnserver.1), [SQLite backups](https://www.sqlite.org/lang_vacuum.html), [Xendit sessions](https://docs.xendit.co/apidocs/create-session), [Apple review guidelines](https://developer.apple.com/app-store/review/guidelines/), [Google payment policy](https://support.google.com/googleplay/android-developer/answer/10281818?hl=en-TJ).

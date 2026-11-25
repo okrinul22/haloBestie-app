@@ -4,14 +4,17 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "api": "tsx server/index.ts",
+    "approve-bestie": "tsx --env-file-if-exists=.env server/manage.ts approve-bestie",
+    "api": "tsx --env-file-if-exists=.env server/index.ts",
     "customer": "EXPO_PUBLIC_APP_ROLE=customer expo start --port 8081",
     "bestie": "EXPO_PUBLIC_APP_ROLE=bestie expo start --port 8082",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test server/session.test.ts",
+    "test": "tsx --test server/*.test.ts",
     "build:customer": "EXPO_PUBLIC_APP_ROLE=customer expo export --platform web --output-dir dist/customer",
     "build:bestie": "EXPO_PUBLIC_APP_ROLE=bestie expo export --platform web --output-dir dist/bestie",
-    "start": "concurrently -k \"npm run api\" \"npm run customer -- --web\" \"npm run bestie -- --web\""
+    "start": "concurrently -k \"npm run api\" \"npm run customer -- --web\" \"npm run bestie -- --web\"",
+    "backup": "tsx --env-file-if-exists=.env server/manage.ts backup",
+    "make-admin": "tsx --env-file-if-exists=.env server/manage.ts make-admin"
   },
   "dependencies": {
     "@expo/metro-runtime": "^58.0.17",

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { VoiceSessionProps } from './voice.types';
-import type { VoicePoll, VoiceSignal } from '../shared/types';
+import type { VoicePoll, VoiceSignal, VoiceConfiguration } from '../shared/types';
 const uuid=()=>crypto.randomUUID();
 const delay=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 
@@ -12,6 +12,7 @@ export default function VoiceSession({bookingId,role,ends,serverNow,request,onRe
   const [error,setError]=useState('');
   const [starting,setStarting]=useState(false);
   const [playBlocked,setPlayBlocked]=useState(false);
+  const configuration=useRef<VoiceConfiguration>({iceServers:[],relayConfigured:false,iceTransportPolicy:'all'});
   const peer=useRef<RTCPeerConnection|null>(null);
   const stream=useRef<MediaStream|null>(null);
   const audio=useRef<HTMLAudioElement|null>(null);
@@ -52,7 +53,7 @@ export default function VoiceSession({bookingId,role,ends,serverNow,request,onRe
   async function flushRemote(pc:RTCPeerConnection) {if(pc.remoteDescription)for(const candidate of pendingIce.current.splice(0))await pc.addIceCandidate(candidate);}
   function createPeer() {
     stopPeer();
-    const pc=new RTCPeerConnection({iceServers:[]});peer.current=pc;
+    const pc=new RTCPeerConnection({iceServers:configuration.current.iceServers,iceTransportPolicy:configuration.current.iceTransportPolicy});peer.current=pc;
     stream.current!.getTracks().forEach(track=>pc.addTrack(track,stream.current!));
     pc.onicecandidate=event=>{
       if(!event.candidate)return;
@@ -85,6 +86,7 @@ export default function VoiceSession({bookingId,role,ends,serverNow,request,onRe
     if(connecting.current||!valid())return;
     connecting.current=true;setStarting(true);setError('');
     try {
+      configuration.current=await callbacks.current.request<VoiceConfiguration>(base+'/voice/config');
       if(!navigator.mediaDevices?.getUserMedia)throw new Error('Microphone access requires localhost or HTTPS in a supported browser.');
       if(!stream.current)stream.current=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:false});
       if(!valid()){stopAll();return;}

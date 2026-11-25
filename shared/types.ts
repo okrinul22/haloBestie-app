@@ -6,6 +6,7 @@ export interface Booking {
   payment: string; created: number; deadline: number | null; started: number | null;
   ends: number | null; customerReady: number; bestieReady: number; reason: string | null;
   refund: number; nickname: string; closedAt: number|null;
+  customerId:string;bestieId:string|null;
 }
 export interface Message { id: string; bookingId: string; role: Role; body: string; created: number }
 export interface Extension { id: string; bookingId: string; minutes: number; price: number; status: string }
@@ -17,6 +18,7 @@ export interface PaymentProof { verified: boolean; receiptNumber: string|null; a
 export type VoicePayload = {type:'offer'|'answer';sdp:string}|{candidate:string;sdpMid:string|null;sdpMLineIndex:number|null;usernameFragment?:string|null};
 export interface VoiceSignal { id:string; callId:string; kind:'offer'|'answer'|'ice'; payload:VoicePayload; sequence?:number }
 export interface VoicePoll { callId:string|null; cursor:number; signals:VoiceSignal[] }
+export interface VoiceConfiguration {iceServers:{urls:string[];username?:string;credential?:string}[];relayConfigured:boolean;iceTransportPolicy:'all'|'relay'}
 export interface Rating { bookingId: string; stars: number; comment: string }
 export interface Activity { completed: number; minutes: number; averageRating: number | null }
 export interface Snapshot {

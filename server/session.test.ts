@@ -121,7 +121,11 @@ test('HTTP role checks, validation and full client-to-client flow',async()=>{
   await new Promise<void>(resolve=>server.once('listening',resolve));
   const address=server.address();assert(address && typeof address!=='string');
   const base=`http://127.0.0.1:${address.port}/api`;
-  const call=(path:string,role:string,body?:unknown)=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{authorization:'Bearer local-'+role,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  const customer=await f.store.accounts.register('customer@example.test','a-long-test-password','Moonlight','customer');
+  await f.store.accounts.register('bestie@example.test','a-long-test-password','Listener','bestie');
+  f.store.accounts.approve('bestie@example.test');
+  const tokens={customer:(await f.store.accounts.login(customer.email,'a-long-test-password','customer')).token,bestie:(await f.store.accounts.login('bestie@example.test','a-long-test-password','bestie')).token};
+  const call=(path:string,role:string,body?:unknown)=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{authorization:'Bearer '+tokens[role as keyof typeof tokens],'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
   try {
     assert.equal((await fetch(base+'/state')).status,401);
     assert.equal((await call('/availability','customer',{online:true})).status,403);
