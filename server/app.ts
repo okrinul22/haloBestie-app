@@ -53,6 +53,16 @@ export function createApp(store: Store) {
     res.json(store.rate(id(req),body.stars,body.comment));
   });
   app.post('/api/bookings/:id/ready',(req,res) => res.json(store.ready(id(req),res.locals.role)));
+  app.get('/api/bookings/:id/payment-proof',(req,res)=>res.json(store.paymentProof(id(req))));
+  const description=(type:'offer'|'answer')=>z.object({type:z.literal(type),sdp:z.string().min(1).max(12000)});
+  const voiceSignal=z.intersection(z.object({id:z.string().uuid(),callId:z.string().uuid()}),z.discriminatedUnion('kind',[
+    z.object({kind:z.literal('offer'),payload:description('offer')}),
+    z.object({kind:z.literal('answer'),payload:description('answer')}),
+    z.object({kind:z.literal('ice'),payload:z.object({candidate:z.string().min(1).max(2000),sdpMid:z.string().max(100).nullable(),sdpMLineIndex:z.number().int().min(0).max(20).nullable(),usernameFragment:z.string().max(200).nullable().optional()})})
+  ]));
+  app.post('/api/bookings/:id/voice/signals',(req,res)=>res.json(store.voiceSignal(id(req),res.locals.role,voiceSignal.parse(req.body))));
+  app.get('/api/bookings/:id/voice/signals',(req,res)=>res.json(store.voicePoll(id(req),res.locals.role,z.coerce.number().int().min(0).default(0).parse(req.query.after))));
+  app.post('/api/bookings/:id/voice/presence',(req,res)=>{const body=z.object({callId:z.string().uuid(),connected:z.boolean()}).parse(req.body);res.json(store.voicePresence(id(req),res.locals.role,body.callId,body.connected));});
   app.post('/api/bookings/:id/messages',(req,res) => {
     const body=z.object({id:z.string().uuid(),body:z.string().trim().min(1).max(2000)}).parse(req.body);
     res.status(201).json(store.send(id(req),res.locals.role,body.id,body.body));

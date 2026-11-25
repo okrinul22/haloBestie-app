@@ -13,11 +13,16 @@ export type PaymentMethod = 'QRIS' | 'EWALLET' | 'VIRTUAL_ACCOUNT';
 export interface PaymentRecord { id: string; bookingId: string; targetId: string; kind: 'booking'|'extension'; amount: number; currency: 'IDR'; method: PaymentMethod; status: 'pending'|'failed'|'paid'; created: number; settledAt: number|null }
 export interface RefundRecord { id: string; paymentId: string; bookingId: string; amount: number; status: 'pending'|'failed'|'completed'; reason: string; attempts: number; updated: number; error: string|null }
 export interface Quote { service: Service; minutes: 10|30|60; amount: number; currency: 'IDR' }
+export interface PaymentProof { verified: boolean; receiptNumber: string|null; amount: number; currency: 'IDR'; paidAt: number|null; mode: 'sandbox' }
+export type VoicePayload = {type:'offer'|'answer';sdp:string}|{candidate:string;sdpMid:string|null;sdpMLineIndex:number|null;usernameFragment?:string|null};
+export interface VoiceSignal { id:string; callId:string; kind:'offer'|'answer'|'ice'; payload:VoicePayload; sequence?:number }
+export interface VoicePoll { callId:string|null; cursor:number; signals:VoiceSignal[] }
 export interface Rating { bookingId: string; stars: number; comment: string }
 export interface Activity { completed: number; minutes: number; averageRating: number | null }
 export interface Snapshot {
   serverNow: number; online: boolean; booking: Booking | null; messages: Message[];
   extensions: Extension[]; nickname: string; history: Booking[]; rating: Rating | null; activity: Activity;
   payments: PaymentRecord[]; refunds: RefundRecord[]; reservedBookingId: string|null;
+  paymentProof: PaymentProof|null;
 }
 export const PRICES = { text: { 10: 15000, 30: 35000, 60: 65000 }, voice: { 10: 25000, 30: 65000, 60: 120000 } } as const;

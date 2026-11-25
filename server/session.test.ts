@@ -9,6 +9,13 @@ import { createApp } from './app';
 import { SandboxPaymentAdapter } from './payments';
 import { DatabaseSync } from 'node:sqlite';
 
+function voiceHandshake(s:Store,id:string) {
+  const callId=randomUUID();
+  s.voiceSignal(id,'customer',{id:randomUUID(),callId,kind:'offer',payload:{type:'offer',sdp:'v=0'}});
+  s.voiceSignal(id,'bestie',{id:randomUUID(),callId,kind:'answer',payload:{type:'answer',sdp:'v=0'}});
+  s.voicePresence(id,'customer',callId,true);s.voicePresence(id,'bestie',callId,true);
+  return callId;
+}
 function fixture() {
   let time=1000000;
   const store=new Store(':memory:',()=>time);
@@ -32,6 +39,8 @@ test('failed payment stays unpaid; successful retries match only once; both clie
     assert.equal(f.store.pay(b.id,'success').deadline,paid.deadline);
     assert.throws(()=>f.store.create('text',10));
     assert.equal(f.store.accept(b.id).status,'connecting');
+    assert.throws(()=>f.store.ready(b.id,'customer'));
+    voiceHandshake(f.store,b.id);
     assert.equal(f.store.ready(b.id,'customer').started,null);
     const started=f.store.ready(b.id,'bestie');
     assert.equal(started.status,'active');
@@ -215,7 +224,7 @@ test('matching reserves only an online listener and releases it after cancellati
     assert.throws(()=>f.store.accept(b.id));
     f.store.availability(true);assert.equal(f.store.snapshot('customer').reservedBookingId,b.id);
     f.store.accept(b.id);assert.equal(f.store.get(b.id).started,null);
-    f.advance(30000);f.store.sweep();
+    f.advance(60000);f.store.sweep();
     assert.equal(f.store.get(b.id).refund,25000);assert.equal(f.store.listener().reservedBookingId,null);
     assert.equal(f.store.snapshot('customer').refunds.length,1);
     assert.equal(f.store.snapshot('bestie').payments.length,0);
@@ -312,5 +321,52 @@ test('extension settlement refunds instead of adding time when Bestie is unavail
     const receipt=f.store.snapshot('customer');
     assert.equal(receipt.refunds[0].amount,15000);assert.equal(receipt.refunds[0].status,'completed');
     f.store.payExtension(b.id,e.id,'success');assert.equal(f.store.snapshot('customer').refunds.length,1);
+  } finally {f.close();}
+});
+test('session access requires the saved matching payment proof, not a client booking status',()=>{
+  const f=fixture();try {
+    f.store.availability(true);const b=f.store.create('text',10);
+    assert.equal(f.store.paymentProof(b.id).verified,false);
+    assert.throws(()=>f.store.accept(b.id));assert.throws(()=>f.store.ready(b.id,'customer'));
+    f.store.pay(b.id,'success');const proof=f.store.paymentProof(b.id);
+    assert.equal(proof.verified,true);assert.equal(proof.amount,15000);assert(proof.receiptNumber);assert(proof.paidAt);
+    f.store.accept(b.id);
+    f.store.db.prepare("UPDATE payments SET amount=1 WHERE targetId=?").run(b.id);
+    assert.equal(f.store.paymentProof(b.id).verified,false);
+    assert.throws(()=>f.store.ready(b.id,'customer'));
+    f.store.db.prepare("UPDATE payments SET amount=15000 WHERE targetId=?").run(b.id);
+    f.store.ready(b.id,'customer');f.store.ready(b.id,'bestie');
+    f.store.db.prepare("UPDATE payments SET status='pending' WHERE targetId=?").run(b.id);
+    assert.throws(()=>f.store.send(b.id,'customer',randomUUID(),'Not paid'));
+    assert.throws(()=>f.store.extend(b.id));
+  } finally {f.close();}
+});
+test('a ten-minute text session admits a message at 09:59.999 and ejects at exactly 10:00',()=>{
+  const f=fixture();try {
+    const b=f.active();f.advance(599999);f.store.heartbeat();
+    f.store.send(b.id,'customer',randomUUID(),'Last message');assert.equal(f.store.get(b.id).status,'active');
+    f.advance(1);assert.throws(()=>f.store.send(b.id,'customer',randomUUID(),'Too late'));
+    assert.equal(f.store.get(b.id).status,'ended');assert.equal(f.store.get(b.id).closedAt,b.ends);
+    assert.equal(f.store.snapshot('customer').booking?.ends,b.ends);
+    assert.throws(()=>f.store.ready(b.id,'customer'));assert.throws(()=>f.store.extend(b.id));
+  } finally {f.close();}
+});
+test('voice requires payment, acceptance, microphone presence, and shuts signaling at ten minutes',()=>{
+  const f=fixture();try {
+    f.store.availability(true);const b=f.store.create('voice',10);
+    assert.throws(()=>f.store.voicePoll(b.id,'customer',0));
+    f.store.pay(b.id,'success');assert.throws(()=>f.store.voicePoll(b.id,'customer',0));
+    f.store.accept(b.id);assert.throws(()=>f.store.ready(b.id,'customer'));
+    const call=voiceHandshake(f.store,b.id);
+    const customerSignals=f.store.voicePoll(b.id,'customer',0);assert.equal(customerSignals.signals[0].kind,'answer');
+    assert.equal(f.store.voicePoll(b.id,'bestie',0).signals[0].kind,'offer');
+    f.store.ready(b.id,'customer');f.store.ready(b.id,'bestie');
+    const end=f.store.get(b.id).ends;
+    assert.throws(()=>f.store.send(b.id,'customer',randomUUID(),'Text cannot replace voice'));
+    for(let i=0;i<19;i++){f.advance(30000);f.store.voicePresence(b.id,'bestie',call,true);}
+    f.advance(29999);f.store.voicePresence(b.id,'bestie',call,true);assert.equal(f.store.get(b.id).status,'active');
+    f.advance(1);assert.throws(()=>f.store.voicePoll(b.id,'customer',0));assert.equal(f.store.get(b.id).status,'ended');
+    assert.equal(f.store.get(b.id).closedAt,end);assert.throws(()=>f.store.voicePresence(b.id,'bestie',call,true));
+    assert.equal((f.store.db.prepare('SELECT COUNT(*) AS n FROM voice_signals WHERE bookingId=?').get(b.id) as {n:number}).n,0);
   } finally {f.close();}
 });

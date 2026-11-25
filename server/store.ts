@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { Booking, Message, Extension, Role, Service, Snapshot, PaymentMethod } from '../shared/types';
+import type { Booking, Message, Extension, Role, Service, Snapshot, PaymentMethod, PaymentProof, VoiceSignal, VoicePoll } from '../shared/types';
 import { PRICES } from '../shared/types';
 import { SandboxPaymentAdapter, type PaymentAdapter } from './payments';
 import { Ledger } from './ledger';
@@ -29,6 +29,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS profile (id INTEGER PRIMARY KEY, nickname TEXT NOT NULL);
       INSERT OR IGNORE INTO profile VALUES (1,'Moonlight');
       CREATE TABLE IF NOT EXISTS ratings (bookingId TEXT PRIMARY KEY REFERENCES bookings(id), stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5), comment TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS voice_calls (bookingId TEXT PRIMARY KEY REFERENCES bookings(id),callId TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS voice_signals (sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,bookingId TEXT NOT NULL REFERENCES bookings(id),callId TEXT NOT NULL,role TEXT NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS voice_presence (bookingId TEXT NOT NULL REFERENCES bookings(id),role TEXT NOT NULL,lastSeen INTEGER NOT NULL,connected INTEGER NOT NULL,PRIMARY KEY(bookingId,role));
     `);
     const columns=this.db.prepare('PRAGMA table_info(bookings)').all() as {name:string}[];
     if(!columns.some(c=>c.name==='closedAt')) this.db.exec('ALTER TABLE bookings ADD COLUMN closedAt INTEGER');
@@ -47,6 +50,17 @@ export class Store {
   }
   listener() { return this.db.prepare('SELECT * FROM listener WHERE id=1').get() as { online: number; heartbeat: number; reservedBookingId:string|null }; }
   online() { const l = this.listener(); return !!l.online && this.now() - l.heartbeat < 15000; }
+  paymentProof(id:string): PaymentProof {
+    const b=this.get(id);const p=this.ledger.payment(id);
+    const refund=this.ledger.refunds(id).find(r=>r.paymentId===p?.id);
+    const verified=!!p&&p.status==='paid'&&p.amount===b.price&&p.currency==='IDR'&&p.settledAt!==null&&(!refund||refund.amount<p.amount)&&b.payment==='paid';
+    return {verified,receiptNumber:verified?p.id:null,amount:b.price,currency:'IDR',paidAt:verified?p.settledAt:null,mode:'sandbox'};
+  }
+  requirePayment(b:Booking) {
+    if(!this.paymentProof(b.id).verified) throw new DomainError('A verified payment receipt is required before entering the session',402);
+  }
+  voicePresenceRow(id:string,role:Role) {return this.db.prepare('SELECT * FROM voice_presence WHERE bookingId=? AND role=?').get(id,role) as {lastSeen:number;connected:number}|undefined;}
+  voiceConnected(id:string,role:Role) {const p=this.voicePresenceRow(id,role);return !!p?.connected&&this.now()-p.lastSeen<5000;}
   reserve() {
     this.db.prepare("UPDATE listener SET reservedBookingId=NULL WHERE reservedBookingId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM bookings WHERE id=listener.reservedBookingId AND status IN ('matching','connecting','active'))").run();
     if(!this.online()) return;
@@ -75,7 +89,8 @@ export class Store {
       const bookings = this.db.prepare("SELECT * FROM bookings WHERE status IN ('matching','connecting','active')").all() as unknown as Booking[];
       for (const b of bookings) {
         // Compare deadlines, not poll order: a restart must retain the correct disconnect refund.
-        const disconnectedAt=Math.max(b.started??0,this.listener().heartbeat)+60000;
+        const lastSeen=b.service==='voice'?(this.voicePresenceRow(b.id,'bestie')?.lastSeen??b.started??0):this.listener().heartbeat;
+        const disconnectedAt=Math.max(b.started??0,lastSeen)+60000;
         if(b.status==='active' && disconnectedAt<=this.now() && disconnectedAt<b.ends!) {
           const refund=this.refundUnused(b,disconnectedAt);
           this.db.prepare("UPDATE bookings SET status='ended',reason='Bestie disconnected · unused time refund requested',refund=?,closedAt=? WHERE id=?").run(refund,disconnectedAt,b.id);
@@ -91,6 +106,7 @@ export class Store {
       this.db.prepare("UPDATE bookings SET payment='simulated_refunded' WHERE status='cancelled' AND payment='refund_pending' AND EXISTS (SELECT 1 FROM refunds WHERE paymentId='booking:'||bookings.id AND status='completed')").run();
       this.db.prepare("UPDATE extensions SET status='simulated_refunded' WHERE status='refund_pending' AND EXISTS (SELECT 1 FROM refunds WHERE paymentId='extension:'||extensions.id AND status='completed')").run();
       this.reserve();
+      this.db.prepare("DELETE FROM voice_signals WHERE bookingId IN (SELECT id FROM bookings WHERE status IN ('ended','cancelled'))").run();
     });
   }
   availability(online: boolean) {
@@ -164,10 +180,11 @@ export class Store {
     this.sweep();
     return this.transaction(() => {
       const b=this.get(id);
+      this.requirePayment(b);
       if (b.status === 'connecting' || b.status === 'active') return b;
       this.reserve();
       if (b.status !== 'matching' || !this.online() || this.listener().reservedBookingId!==id) throw new DomainError('Go online and accept your reserved booking');
-      this.db.prepare("UPDATE bookings SET status='connecting',deadline=? WHERE id=?").run(this.now()+30000,id);
+      this.db.prepare("UPDATE bookings SET status='connecting',deadline=? WHERE id=?").run(this.now()+(b.service==='voice'?60000:30000),id);
       return this.get(id);
     });
   }
@@ -206,8 +223,10 @@ export class Store {
     this.sweep();
     return this.transaction(() => {
       const b=this.get(id);
+      this.requirePayment(b);
       if (b.status === 'active') return b;
       if (b.status !== 'connecting') throw new DomainError('Wait for the Bestie to accept');
+      if(b.service==='voice'&&!this.voiceConnected(id,role)) throw new DomainError('Connect your microphone call before starting the timer');
       this.db.prepare(`UPDATE bookings SET ${role === 'customer' ? 'customerReady' : 'bestieReady'}=1 WHERE id=?`).run(id);
       const updated=this.get(id);
       if (updated.customerReady && updated.bestieReady) {
@@ -220,6 +239,8 @@ export class Store {
   send(id: string, role: Role, messageId: string, body: string) {
     this.sweep();
     return this.transaction(() => {
+      const booking=this.get(id);this.requirePayment(booking);
+      if(booking.service==='voice') throw new DomainError('Voice sessions use microphone audio, not text chat');
       const previous=this.db.prepare('SELECT * FROM messages WHERE id=?').get(messageId) as unknown as Message | undefined;
       if(previous) {
         if(previous.bookingId!==id || previous.role!==role || previous.body!==body) throw new DomainError('Message ID already used');
@@ -235,7 +256,9 @@ export class Store {
     this.sweep();
     return this.transaction(() => {
       const b=this.get(id);
+      this.requirePayment(b);
       if(b.status !== 'active' || !this.online()) throw new DomainError('Extension requires an active session and an available Bestie');
+      if(b.service==='voice'&&!this.voiceConnected(id,'bestie')) throw new DomainError('Reconnect the voice call before extending');
       const pending=this.extensions(id).find(e => e.status === 'pending' || e.status === 'failed');
       if(pending) return pending;
       const extension: Extension={id:randomUUID(),bookingId:id,minutes:10,price:PRICES[b.service][10],status:'pending'};
@@ -252,7 +275,7 @@ export class Store {
       if(this.ledger.payment(extensionId).status==='paid') return e;
       const b=this.get(id);
       const paid=this.ledger.settle(extensionId,outcome,eventId) === 'paid';
-      let status=!paid ? 'failed' : b.status !== 'active'||!this.online() ? 'simulated_refunded' : 'applied';
+      let status=!paid ? 'failed' : b.status !== 'active'||!this.online()||(b.service==='voice'&&!this.voiceConnected(id,'bestie')) ? 'simulated_refunded' : 'applied';
       if(status === 'simulated_refunded' && this.ledger.refund(extensionId,e.price,b.status==='active'?'Bestie unavailable for extension':'Extension payment arrived after session ended')?.status!=='completed') status='refund_pending';
       if(status === 'applied') this.db.prepare('UPDATE bookings SET ends=ends+? WHERE id=?').run(e.minutes*60000,id);
       this.db.prepare('UPDATE extensions SET status=? WHERE id=?').run(status,e.id);
@@ -271,7 +294,53 @@ export class Store {
     const minutes=this.db.prepare("SELECT COALESCE(SUM(MAX(0,MIN(ends,COALESCE(closedAt,ends))-started)/60000.0),0) AS minutes FROM bookings WHERE status='ended' AND started IS NOT NULL").get() as {minutes:number};
     const average=this.db.prepare('SELECT AVG(stars) AS averageRating FROM ratings').get() as {averageRating:number|null};
     const rating=visible ? this.db.prepare('SELECT * FROM ratings WHERE bookingId=?').get(visible.id) as unknown as Snapshot['rating'] : null;
-    return {serverNow:this.now(),online:this.online(),booking:visible,messages:visible ? this.messages(visible.id) : [],extensions:visible ? this.extensions(visible.id) : [],nickname:this.nickname(),history,rating:rating??null,activity:{...stats,minutes:Math.round(minutes.minutes),...average},payments:role==='customer'&&visible?this.ledger.payments(visible.id):[],refunds:role==='customer'&&visible?this.ledger.refunds(visible.id):[],reservedBookingId:this.listener().reservedBookingId};
+    return {serverNow:this.now(),online:this.online(),booking:visible,messages:visible ? this.messages(visible.id) : [],extensions:visible ? this.extensions(visible.id) : [],nickname:this.nickname(),history,rating:rating??null,activity:{...stats,minutes:Math.round(minutes.minutes),...average},payments:role==='customer'&&visible?this.ledger.payments(visible.id):[],refunds:role==='customer'&&visible?this.ledger.refunds(visible.id):[],reservedBookingId:this.listener().reservedBookingId,paymentProof:visible?this.paymentProof(visible.id):null};
+  }
+  voiceAccess(id:string) {
+    this.sweep();const b=this.get(id);this.requirePayment(b);
+    if(b.service!=='voice'||!['connecting','active'].includes(b.status)) throw new DomainError('Voice access is closed or this is a text session');
+    return b;
+  }
+  voiceSignal(id:string,role:Role,signal:VoiceSignal) {
+    this.voiceAccess(id);
+    return this.transaction(()=>{
+      const previous=this.db.prepare('SELECT * FROM voice_signals WHERE id=?').get(signal.id) as {bookingId:string;role:string;callId:string;kind:string;payload:string}|undefined;
+      const payload=JSON.stringify(signal.payload);
+      if(previous) {
+        if(previous.bookingId!==id||previous.role!==role||previous.callId!==signal.callId||previous.kind!==signal.kind||previous.payload!==payload) throw new DomainError('Signal ID conflicts with an earlier request');
+        return {ok:true};
+      }
+      const current=this.db.prepare('SELECT callId FROM voice_calls WHERE bookingId=?').get(id) as {callId:string}|undefined;
+      if(signal.kind==='offer') {
+        if(role!=='customer') throw new DomainError('Only the customer can initiate the voice connection',403);
+        if(current?.callId!==signal.callId) {
+          this.db.prepare('DELETE FROM voice_signals WHERE bookingId=?').run(id);
+          this.db.prepare('UPDATE voice_presence SET connected=0 WHERE bookingId=?').run(id);
+          this.db.prepare('INSERT INTO voice_calls VALUES (?,?) ON CONFLICT(bookingId) DO UPDATE SET callId=excluded.callId').run(id,signal.callId);
+        }
+      } else if(current?.callId!==signal.callId) throw new DomainError('Voice connection changed; reconnect to the current call');
+      if(signal.kind==='answer'&&role!=='bestie') throw new DomainError('Only the Bestie can answer',403);
+      const count=this.db.prepare('SELECT COUNT(*) AS n FROM voice_signals WHERE bookingId=?').get(id) as {n:number};
+      if(count.n>=300) throw new DomainError('Too many voice signals; reconnect',429);
+      this.db.prepare('INSERT INTO voice_signals(id,bookingId,callId,role,kind,payload) VALUES (?,?,?,?,?,?)').run(signal.id,id,signal.callId,role,signal.kind,payload);
+      return {ok:true};
+    });
+  }
+  voicePoll(id:string,role:Role,after:number): VoicePoll {
+    this.voiceAccess(id);
+    const current=this.db.prepare('SELECT callId FROM voice_calls WHERE bookingId=?').get(id) as {callId:string}|undefined;
+    const rows=this.db.prepare('SELECT id,callId,kind,payload,sequence FROM voice_signals WHERE bookingId=? AND role<>? AND sequence>? ORDER BY sequence').all(id,role,after) as unknown as (Omit<VoiceSignal,'payload'>&{payload:string})[];
+    const cursor=(this.db.prepare('SELECT COALESCE(MAX(sequence),?) AS cursor FROM voice_signals WHERE bookingId=?').get(after,id) as {cursor:number}).cursor;
+    return {callId:current?.callId??null,cursor,signals:rows.map(s=>({...s,payload:JSON.parse(s.payload)}))};
+  }
+  voicePresence(id:string,role:Role,callId:string,connected:boolean) {
+    this.voiceAccess(id);
+    const call=this.db.prepare('SELECT callId FROM voice_calls WHERE bookingId=?').get(id) as {callId:string}|undefined;
+    if(call?.callId!==callId) throw new DomainError('Voice connection changed');
+    if(connected&&!this.db.prepare("SELECT id FROM voice_signals WHERE bookingId=? AND callId=? AND kind='answer'").get(id,callId)) throw new DomainError('Wait for the other participant to answer');
+    const lastSeen=connected?this.now():(this.voicePresenceRow(id,role)?.lastSeen??0);
+    this.db.prepare('INSERT INTO voice_presence VALUES (?,?,?,?) ON CONFLICT(bookingId,role) DO UPDATE SET lastSeen=excluded.lastSeen,connected=excluded.connected').run(id,role,lastSeen,connected?1:0);
+    return {ok:true};
   }
   close() { this.db.close(); }
 }
