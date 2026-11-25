@@ -1,93 +1,51 @@
-# haloBestie
+# HaloBestie — one-day demo
 
+Implements the limited scope in `document/HaloBestie Implementation Plan.docx`. Two React Native / Expo app targets share a TypeScript codebase and an Express + SQLite backend. Seeded customer **Moonlight** and one Bestie; no registration.
 
+## Run locally
 
-## Getting started
+Requires Node.js 24 (uses built-in SQLite) and npm.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://gitlab.com/okri.nul22/halobestie.git
-git branch -M main
-git push -uf origin main
+```sh
+npm install
+npm run demo
 ```
 
-## Integrate with your tools
+Open the two web URLs printed by Expo: **Customer on port 8081**, **Bestie on port 8082**. The backend is on `http://localhost:3001`. Keep the listener app open for heartbeats. The web preview is included for easy demonstration; Android and iOS use the same React Native screens.
 
-* [Set up project integrations](https://gitlab.com/okri.nul22/halobestie/-/settings/integrations)
+For Android with Expo Go, first copy `.env.example` to `.env` and change `EXPO_PUBLIC_API_URL` to your computer's LAN IP, for example `http://192.168.1.20:3001`. Put phone and computer on the same network. Start the backend and each app in separate terminals:
 
-## Collaborate with your team
+```sh
+npm run api
+npm run customer
+npm run bestie
+```
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Scan each Expo QR code on separate devices. `npm run customer -- --android` / `npm run bestie -- --android` require an installed Android emulator. iOS device/simulator execution has not been verified in this Linux workspace.
 
-## Test and Deploy
+## Try the complete flow
 
-Use the built-in continuous integration in GitLab.
+1. Open Bestie, click **Go online**.
+2. Open Customer, choose text and 10 or 30 minutes, then continue.
+3. Choose **Simulate successful payment**. No money is charged.
+4. Bestie accepts. Both participants click **I'm ready to start**.
+5. Send messages in both directions. Reloading preserves messages and server time.
+6. Customer adds 10 minutes and completes simulated extension checkout. The server adds time once.
+7. At expiry, sending closes automatically. Use tests for expiry without waiting ten minutes.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+Failure demos: choose failed payment and retry; leave Bestie offline and wait 30 seconds for a full simulated refund; accept but leave one participant unready for a connection-timeout refund; close the Bestie tab for at least 60 seconds during a session to refund unused time. Reopening sooner reconnects without resetting the timer. Customer disconnects do not pause time. A successful late extension payment is refunded, not applied.
 
-***
+Only one booking can be open at a time in this seeded demo. The backend reserves this slot transactionally. A new booking is available after completion/cancellation. Messages use client IDs for retry deduplication. No customer email or phone is stored or returned. SQLite data persists in `data/halobestie.sqlite`; stop the backend and remove `data/` to reset.
 
-# Editing this README
+## Checks
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```sh
+npm run typecheck
+npm test
+npm run build:customer
+npm run build:bestie
+```
 
-## Suggestions for a good README
+## Boundaries
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Payments/refunds are **simulated**, using a replaceable adapter in `server/payments.ts`. Voice booking is a **placeholder**, using text for the demonstration. Real Xendit checkout/webhooks, live audio, secure authentication, real refunds, production hardening, and store submission are deferred exactly as scoped. Demo identity tokens are public and are not production authentication. Run locally; do not expose this demo as a public service. Production TLS and privacy controls are not implemented.
