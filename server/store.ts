@@ -2,12 +2,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { Booking, Message, Extension, Role, Service, Snapshot } from '../shared/types';
 import { PRICES } from '../shared/types';
-import { DemoPaymentAdapter, type PaymentAdapter } from './payments';
+import { SandboxPaymentAdapter, type PaymentAdapter } from './payments';
 
 export class DomainError extends Error { constructor(message: string, public status = 409) { super(message); } }
 export class Store {
   db: DatabaseSync;
-  constructor(path: string, private now = () => Date.now(), private payments: PaymentAdapter = new DemoPaymentAdapter()) {
+  constructor(path: string, private now = () => Date.now(), private payments: PaymentAdapter = new SandboxPaymentAdapter()) {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS listener (id INTEGER PRIMARY KEY, online INTEGER NOT NULL, heartbeat INTEGER NOT NULL);
@@ -24,7 +24,12 @@ export class Store {
         role TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS extensions (id TEXT PRIMARY KEY, bookingId TEXT NOT NULL REFERENCES bookings(id),
         minutes INTEGER NOT NULL, price INTEGER NOT NULL, status TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS profile (id INTEGER PRIMARY KEY, nickname TEXT NOT NULL);
+      INSERT OR IGNORE INTO profile VALUES (1,'Moonlight');
+      CREATE TABLE IF NOT EXISTS ratings (bookingId TEXT PRIMARY KEY REFERENCES bookings(id), stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5), comment TEXT NOT NULL);
     `);
+    const columns=this.db.prepare('PRAGMA table_info(bookings)').all() as {name:string}[];
+    if(!columns.some(c=>c.name==='closedAt')) this.db.exec('ALTER TABLE bookings ADD COLUMN closedAt INTEGER');
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -43,13 +48,13 @@ export class Store {
       const bookings = this.db.prepare("SELECT * FROM bookings WHERE status IN ('matching','connecting','active')").all() as unknown as Booking[];
       for (const b of bookings) {
         if (b.status === 'active' && b.ends! <= this.now()) {
-          this.db.prepare("UPDATE bookings SET status='ended',reason='Time completed' WHERE id=?").run(b.id);
+          this.db.prepare("UPDATE bookings SET status='ended',reason='Time completed',closedAt=ends WHERE id=?").run(b.id);
         } else if (b.status === 'active' && this.now() - this.listener().heartbeat >= 60000) {
           const remaining = Math.max(0, b.ends! - this.now());
           const ext = this.extensions(b.id).filter(e => e.status === 'applied');
           const total = b.price + ext.reduce((s,e) => s+e.price,0);
           const refund = this.payments.refund(Math.min(total, Math.ceil(total * remaining / (b.ends! - b.started!))));
-          this.db.prepare("UPDATE bookings SET status='ended',reason='Bestie disconnected · unused time refunded (demo)',refund=? WHERE id=?").run(refund.amount, b.id);
+          this.db.prepare("UPDATE bookings SET status='ended',reason='Bestie disconnected · unused time refunded (sandbox)',refund=?,closedAt=? WHERE id=?").run(refund.amount, this.now(), b.id);
         } else if (b.status !== 'active' && b.deadline! <= this.now()) {
           this.payments.refund(b.price);
           this.db.prepare("UPDATE bookings SET status='cancelled',payment='simulated_refunded',refund=price,reason=? WHERE id=?")
@@ -65,13 +70,18 @@ export class Store {
     this.db.prepare('UPDATE listener SET online=?,heartbeat=? WHERE id=1').run(online ? 1 : 0, this.now());
   }
   heartbeat() { this.db.prepare('UPDATE listener SET heartbeat=? WHERE id=1 AND online=1').run(this.now()); }
-  create(service: Service, minutes: 10 | 30) {
+  nickname() { return (this.db.prepare('SELECT nickname FROM profile WHERE id=1').get() as {nickname:string}).nickname; }
+  updateNickname(nickname: string) {
+    this.db.prepare('UPDATE profile SET nickname=? WHERE id=1').run(nickname);
+    return {nickname};
+  }
+  create(service: Service, minutes: 10 | 30 | 60) {
     this.sweep();
     return this.transaction(() => {
       if (this.db.prepare("SELECT id FROM bookings WHERE status IN ('unpaid','matching','connecting','active')").get()) throw new DomainError('Finish or cancel your current booking first');
       const id = randomUUID();
-      this.db.prepare("INSERT INTO bookings (id,service,minutes,price,status,payment,created) VALUES (?,?,?,?,'unpaid','pending',?)")
-        .run(id,service,minutes,PRICES[service][minutes],this.now());
+      this.db.prepare("INSERT INTO bookings (id,service,minutes,price,status,payment,created,nickname) VALUES (?,?,?,?,'unpaid','pending',?,?)")
+        .run(id,service,minutes,PRICES[service][minutes],this.now(),this.nickname());
       return this.get(id);
     });
   }
@@ -107,6 +117,38 @@ export class Store {
       this.db.prepare("UPDATE bookings SET status='connecting',deadline=? WHERE id=?").run(this.now()+30000,id);
       return this.get(id);
     });
+  }
+  decline(id: string) {
+    this.sweep();
+    return this.transaction(() => {
+      const b=this.get(id);
+      if(b.status==='cancelled' && b.reason==='Bestie unavailable') return b;
+      if(b.status!=='matching') throw new DomainError('Only a waiting booking can be declined');
+      this.payments.refund(b.price);
+      this.db.prepare("UPDATE bookings SET status='cancelled',payment='simulated_refunded',refund=price,reason='Bestie unavailable' WHERE id=?").run(id);
+      return this.get(id);
+    });
+  }
+  finish(id: string, role: Role) {
+    this.sweep();
+    return this.transaction(() => {
+      const b=this.get(id);
+      if(b.status==='ended') return b;
+      if(b.status!=='active') throw new DomainError('Only an active session can be ended');
+      const ext=this.extensions(id).filter(e=>e.status==='applied');
+      const total=b.price+ext.reduce((sum,e)=>sum+e.price,0);
+      const remaining=Math.max(0,b.ends!-this.now());
+      const refund=role==='bestie' ? this.payments.refund(Math.min(total,Math.ceil(total*remaining/(b.ends!-b.started!)))).amount : 0;
+      this.db.prepare("UPDATE bookings SET status='ended',reason=?,refund=?,closedAt=? WHERE id=?")
+        .run(role==='bestie'?'Bestie ended the session · unused time refunded (sandbox)':'Customer ended the session',refund,this.now(),id);
+      return this.get(id);
+    });
+  }
+  rate(id: string, stars: number, comment: string) {
+    this.sweep();
+    if(this.get(id).status!=='ended') throw new DomainError('Rate a completed session');
+    this.db.prepare('INSERT INTO ratings VALUES (?,?,?) ON CONFLICT(bookingId) DO UPDATE SET stars=excluded.stars,comment=excluded.comment').run(id,stars,comment);
+    return {bookingId:id,stars,comment};
   }
   ready(id: string, role: Role) {
     this.sweep();
@@ -164,13 +206,19 @@ export class Store {
       return {...e,status};
     });
   }
-  snapshot(role: Role): Snapshot {
+  snapshot(role: Role, selectedId?: string): Snapshot {
     // Sweep before heartbeat so a returning listener cannot erase a timed-out disconnect.
     this.sweep();
     if(role === 'bestie') this.heartbeat();
-    const b=this.db.prepare('SELECT * FROM bookings ORDER BY created DESC,rowid DESC LIMIT 1').get() as unknown as Booking | undefined;
+    const b=selectedId ? this.get(selectedId) : this.db.prepare('SELECT * FROM bookings ORDER BY created DESC,rowid DESC LIMIT 1').get() as unknown as Booking | undefined;
+    if(selectedId && !['ended','cancelled'].includes(b!.status)) throw new DomainError('History is available for closed sessions');
     const visible=role === 'bestie' && b?.status === 'unpaid' ? null : b ?? null;
-    return {serverNow:this.now(),online:this.online(),booking:visible,messages:visible ? this.messages(visible.id) : [],extensions:visible ? this.extensions(visible.id) : [],nickname:'Moonlight'};
+    const history=this.db.prepare("SELECT * FROM bookings WHERE status IN ('ended','cancelled') ORDER BY created DESC,rowid DESC LIMIT 30").all() as unknown as Booking[];
+    const stats=this.db.prepare("SELECT COUNT(*) AS completed FROM bookings WHERE status='ended'").get() as {completed:number};
+    const minutes=this.db.prepare("SELECT COALESCE(SUM(MAX(0,MIN(ends,COALESCE(closedAt,ends))-started)/60000.0),0) AS minutes FROM bookings WHERE status='ended' AND started IS NOT NULL").get() as {minutes:number};
+    const average=this.db.prepare('SELECT AVG(stars) AS averageRating FROM ratings').get() as {averageRating:number|null};
+    const rating=visible ? this.db.prepare('SELECT * FROM ratings WHERE bookingId=?').get(visible.id) as unknown as Snapshot['rating'] : null;
+    return {serverNow:this.now(),online:this.online(),booking:visible,messages:visible ? this.messages(visible.id) : [],extensions:visible ? this.extensions(visible.id) : [],nickname:this.nickname(),history,rating:rating??null,activity:{...stats,minutes:Math.round(minutes.minutes),...average}};
   }
   close() { this.db.close(); }
 }

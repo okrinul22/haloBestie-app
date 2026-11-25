@@ -109,24 +109,74 @@ test('HTTP role checks, validation and full client-to-client flow',async()=>{
   await new Promise<void>(resolve=>server.once('listening',resolve));
   const address=server.address();assert(address && typeof address!=='string');
   const base=`http://127.0.0.1:${address.port}/api`;
-  const call=(path:string,role:string,body?:unknown)=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{authorization:'Bearer demo-'+role,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  const call=(path:string,role:string,body?:unknown)=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{authorization:'Bearer local-'+role,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
   try {
     assert.equal((await fetch(base+'/state')).status,401);
     assert.equal((await call('/availability','customer',{online:true})).status,403);
+    assert.equal((await call('/profile','bestie',{nickname:'Sunrise'})).status,403);
+    assert.equal((await call('/profile','customer',{nickname:'email@example.com'})).status,400);
+    assert.equal((await call('/profile','customer',{nickname:'Sunrise'})).status,200);
     assert.equal((await call('/bookings','customer',{service:'text',minutes:1})).status,400);
     await call('/availability','bestie',{online:true});
     const b=await (await call('/bookings','customer',{service:'text',minutes:10,price:1})).json();
     assert.equal(b.price,15000);
+    assert.equal(b.nickname,'Sunrise');
     await call(`/bookings/${b.id}/pay`,'customer',{outcome:'success'});
     await call(`/bookings/${b.id}/accept`,'bestie',{});
     await call(`/bookings/${b.id}/ready`,'customer',{});await call(`/bookings/${b.id}/ready`,'bestie',{});
     assert.equal((await call(`/bookings/${b.id}/messages`,'customer',{id:randomUUID(),body:'Hi'})).status,201);
     const state=await (await call('/state','bestie')).json();
-    assert.equal(state.messages[0].body,'Hi');assert.equal(state.booking.nickname,'Moonlight');
+    assert.equal(state.messages[0].body,'Hi');assert.equal(state.booking.nickname,'Sunrise');
     assert(!JSON.stringify(state).includes('email'));assert(!JSON.stringify(state).includes('phone'));
     const e=await(await call(`/bookings/${b.id}/extensions`,'customer',{})).json();
     assert.equal((await call(`/bookings/${b.id}/extensions/${e.id}/pay`,'bestie',{outcome:'success'})).status,403);
     const applied=await(await call(`/bookings/${b.id}/extensions/${e.id}/pay`,'customer',{outcome:'success'})).json();
     assert.equal(applied.status,'applied');
+    assert.equal((await call(`/bookings/${b.id}/rating`,'customer',{stars:5,comment:''})).status,409);
+    assert.equal((await call(`/bookings/${b.id}/end`,'bestie',{})).status,200);
+    assert.equal((await call(`/bookings/${b.id}/rating`,'bestie',{stars:5,comment:''})).status,403);
+    assert.equal((await call(`/bookings/${b.id}/rating`,'customer',{stars:6,comment:''})).status,400);
+    assert.equal((await call(`/bookings/${b.id}/rating`,'customer',{stars:5,comment:'Thank you'})).status,200);
+    const ratedState=await(await call('/state?bookingId='+b.id,'customer')).json();
+    assert.equal(ratedState.rating.stars,5);
+    assert.equal(ratedState.activity.averageRating,5);
   } finally {await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));f.close();}
+});
+test('nickname changes apply to future bookings; hour-long sessions use server prices',()=>{
+  const f=fixture();try {
+    f.store.updateNickname('Sunrise');
+    const b=f.store.create('text',60);
+    assert.equal(b.price,65000);assert.equal(b.nickname,'Sunrise');
+    f.store.updateNickname('Starlight');assert.equal(f.store.get(b.id).nickname,'Sunrise');
+    f.store.cancel(b.id);
+    const voice=f.store.create('voice',60);assert.equal(voice.price,120000);assert.equal(voice.nickname,'Starlight');
+  } finally {f.close();}
+});
+test('decline refunds once and releases the reservation',()=>{
+  const f=fixture();try {
+    const b=f.store.create('text',10);f.store.pay(b.id,'success');
+    assert.equal(f.store.decline(b.id).refund,15000);
+    assert.equal(f.store.decline(b.id).refund,15000);
+    assert.throws(()=>f.store.accept(b.id));
+    assert.equal(f.store.create('text',10).status,'unpaid');
+  } finally {f.close();}
+});
+test('early ending applies role-specific refunds and freezes supported minutes',()=>{
+  const f=fixture();try {
+    const b=f.active();f.advance(60000);f.store.heartbeat();
+    assert.equal(f.store.finish(b.id,'customer').refund,0);
+    assert.equal(f.store.snapshot('customer').activity.minutes,1);
+    f.advance(60000);assert.equal(f.store.snapshot('customer').activity.minutes,1);
+    const next=f.active();f.advance(60000);f.store.heartbeat();
+    const ended=f.store.finish(next.id,'bestie');assert.equal(ended.refund,13500);
+    assert.equal(f.store.finish(next.id,'bestie').refund,13500);
+    assert.throws(()=>f.store.send(next.id,'customer',randomUUID(),'too late'));
+    f.store.rate(next.id,4,'Helpful');
+    const snapshot=f.store.snapshot('customer',next.id);
+    assert.equal(snapshot.rating?.stars,4);assert.equal(snapshot.activity.averageRating,4);
+    assert.equal(snapshot.activity.completed,2);assert.equal(snapshot.activity.minutes,2);
+    f.store.create('text',10);
+    assert.equal(f.store.snapshot('customer',next.id).booking?.id,next.id);
+    assert.equal(f.store.snapshot('customer').history.length,2);
+  } finally {f.close();}
 });

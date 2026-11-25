@@ -1,5 +1,5 @@
 {
-  "name": "halobestie-demo",
+  "name": "halobestie-app",
   "version": "1.0.0",
   "private": true,
   "main": "index.ts",
@@ -7,11 +7,11 @@
     "api": "tsx server/index.ts",
     "customer": "EXPO_PUBLIC_APP_ROLE=customer expo start --port 8081",
     "bestie": "EXPO_PUBLIC_APP_ROLE=bestie expo start --port 8082",
-    "demo": "concurrently -k \"npm run api\" \"npm run customer -- --web\" \"npm run bestie -- --web\"",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test server/session.test.ts",
     "build:customer": "EXPO_PUBLIC_APP_ROLE=customer expo export --platform web --output-dir dist/customer",
-    "build:bestie": "EXPO_PUBLIC_APP_ROLE=bestie expo export --platform web --output-dir dist/bestie"
+    "build:bestie": "EXPO_PUBLIC_APP_ROLE=bestie expo export --platform web --output-dir dist/bestie",
+    "start": "concurrently -k \"npm run api\" \"npm run customer -- --web\" \"npm run bestie -- --web\""
   },
   "dependencies": {
     "@expo/metro-runtime": "^58.0.17",

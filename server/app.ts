@@ -8,12 +8,12 @@ export function createApp(store: Store) {
   const app=express();
   app.use(cors());
   app.use(express.json({limit:'16kb'}));
-  app.get('/health',(_req,res) => res.json({ok:true,mode:'demo'}));
+  app.get('/health',(_req,res) => res.json({ok:true,mode:'local'}));
   app.use('/api',(req,res,next) => {
     const token=req.header('authorization');
-    if(token === 'Bearer demo-customer') res.locals.role='customer';
-    else if(token === 'Bearer demo-bestie') res.locals.role='bestie';
-    else return res.status(401).json({error:'Demo identity required'});
+    if(token === 'Bearer local-customer') res.locals.role='customer';
+    else if(token === 'Bearer local-bestie') res.locals.role='bestie';
+    else return res.status(401).json({error:'Local identity required'});
     next();
   });
   const only=(role: Role): express.RequestHandler => (_req,res,next) => {
@@ -22,17 +22,27 @@ export function createApp(store: Store) {
   };
   const id=(req: express.Request) => z.string().uuid().parse(req.params.id);
   const outcome=z.object({outcome:z.enum(['success','failure'])});
-  app.get('/api/state',(_req,res) => res.json(store.snapshot(res.locals.role)));
+  app.get('/api/state',(req,res) => res.json(store.snapshot(res.locals.role,req.query.bookingId===undefined ? undefined : z.string().uuid().parse(req.query.bookingId))));
+  app.post('/api/profile',only('customer'),(req,res) => {
+    const body=z.object({nickname:z.string().trim().min(2).max(24).regex(/^[\p{L}\p{N} _-]+$/u,'Use letters, numbers, spaces, underscores or hyphens')}).parse(req.body);
+    res.json(store.updateNickname(body.nickname));
+  });
   app.post('/api/availability',only('bestie'),(req,res) => {
     store.availability(z.object({online:z.boolean()}).parse(req.body).online); res.json({ok:true});
   });
   app.post('/api/bookings',only('customer'),(req,res) => {
-    const body=z.object({service:z.enum(['text','voice']),minutes:z.union([z.literal(10),z.literal(30)])}).parse(req.body);
+    const body=z.object({service:z.enum(['text','voice']),minutes:z.union([z.literal(10),z.literal(30),z.literal(60)])}).parse(req.body);
     res.status(201).json(store.create(body.service,body.minutes));
   });
   app.post('/api/bookings/:id/pay',only('customer'),(req,res) => res.json(store.pay(id(req),outcome.parse(req.body).outcome)));
   app.post('/api/bookings/:id/cancel',only('customer'),(req,res) => res.json(store.cancel(id(req))));
   app.post('/api/bookings/:id/accept',only('bestie'),(req,res) => res.json(store.accept(id(req))));
+  app.post('/api/bookings/:id/decline',only('bestie'),(req,res) => res.json(store.decline(id(req))));
+  app.post('/api/bookings/:id/end', (req,res) => res.json(store.finish(id(req),res.locals.role)));
+  app.post('/api/bookings/:id/rating',only('customer'),(req,res) => {
+    const body=z.object({stars:z.number().int().min(1).max(5),comment:z.string().trim().max(300)}).parse(req.body);
+    res.json(store.rate(id(req),body.stars,body.comment));
+  });
   app.post('/api/bookings/:id/ready',(req,res) => res.json(store.ready(id(req),res.locals.role)));
   app.post('/api/bookings/:id/messages',(req,res) => {
     const body=z.object({id:z.string().uuid(),body:z.string().trim().min(1).max(2000)}).parse(req.body);

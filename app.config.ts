@@ -6,8 +6,8 @@ export default {
     version: '1.0.0',
     orientation: 'portrait',
     scheme: bestie ? 'halobestie-listener' : 'halobestie',
-    ios: { bundleIdentifier: bestie ? 'com.halobestie.demo.listener' : 'com.halobestie.demo.customer' },
-    android: { package: bestie ? 'com.halobestie.demo.listener' : 'com.halobestie.demo.customer' },
+    ios: { bundleIdentifier: bestie ? 'com.halobestie.listener' : 'com.halobestie.customer' },
+    android: { package: bestie ? 'com.halobestie.listener' : 'com.halobestie.customer' },
     web: { bundler: 'metro' }
   }
 };

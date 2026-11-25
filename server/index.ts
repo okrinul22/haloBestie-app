@@ -4,7 +4,7 @@ import { createApp } from './app';
 mkdirSync('data',{recursive:true});
 const store=new Store(process.env.DATABASE_PATH ?? 'data/halobestie.sqlite');
 const app=createApp(store);
-const server=app.listen(Number(process.env.PORT ?? 3001),'0.0.0.0',() => console.log('HaloBestie demo API listening on port '+(process.env.PORT ?? 3001)));
+const server=app.listen(Number(process.env.PORT ?? 3001),'0.0.0.0',() => console.log('HaloBestie API listening on port '+(process.env.PORT ?? 3001)));
 const timer=setInterval(() => { try { store.sweep(); } catch(error) { console.error('Session reconciliation failed',error); } },1000);
 const stop=() => { clearInterval(timer); server.close(() => { store.close(); process.exit(0); }); };
 process.on('SIGTERM',stop); process.on('SIGINT',stop);
